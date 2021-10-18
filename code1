@@ -1,0 +1,73 @@
+def mask_to_yolo(mass_mask):
+    """
+    Convert a mask into yolo annotations. 
+    Each mass must have a different pixel id in the mask.
+    """
+    
+    res = []
+    height, width = mass_mask.shape
+    nbr_mass = len(np.unique(mass_mask))-1
+    
+    for i in range(nbr_mass):
+        mask = mass_mask.copy()
+        mask[mass_mask!=i+1]=0
+        #find contours of each mass
+        cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        #create a bbox around the contours
+        x, y, w, h = cv2.boundingRect(cnts[0])
+        #convert to yolo format
+        x = x+w//2 -1
+        y= y+h//2 -1
+        res.append([x/width,y/height,w/width,h/height, 'mass'])
+    return res
+
+def crop(img, mask):
+    """
+    Crop ROI from image.
+    """
+
+    # Otsu's thresholding after Gaussian filtering
+    blur = cv2.GaussianBlur(img,(5,5),0)
+    _, breast_mask = cv2.threshold(blur,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    
+    cnts, _ = cv2.findContours(breast_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnt = max(cnts, key = cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(cnt)
+
+    return img[y:y+h, x:x+w], breast_mask[y:y+h, x:x+w], mask[y:y+h, x:x+w]
+
+def truncation_normalization(img, mask):
+    """
+    Pixel clipped and normalized in breast ROI
+    """
+    Pmin = np.percentile(img[mask!=0], 5)
+    Pmax = np.percentile(img[mask!=0], 99)
+    truncated = np.clip(img,Pmin, Pmax)  
+    normalized = (truncated - Pmin)/(Pmax - Pmin)
+    normalized[mask==0]=0
+    return normalized
+
+def clahe(img, clip):
+    #contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=clip)
+    cl = clahe.apply(np.array(img*255, dtype=np.uint8))
+    return cl
+
+def synthesized_images(patient_id):
+    """
+    Merging of truncation_normalization + clahe1 + clahe2
+    """
+    image_path = glob.glob('INbreast Release 1.0/AllDICOMs/'+ str(patient_id)+'*.dcm')[0]
+    mass_mask = load_inbreast_mask('INbreast Release 1.0/AllXML/'+str(patient_id)+'.xml')
+    ds = dicom.dcmread(image_path)
+    pixel_array_numpy = ds.pixel_array
+
+    breast, mask, mass_mask = crop(pixel_array_numpy, mass_mask)
+    normalized = truncation_normalization(breast, mask)
+
+    cl1 = clahe(normalized, 1.0)
+    cl2 = clahe(normalized, 2.0)
+
+    synthetized = cv2.merge((np.array(normalized*255, dtype=np.uint8),cl1,cl2))
+    return breast, synthetized, mass_mask
+
